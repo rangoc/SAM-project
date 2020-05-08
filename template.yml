@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Resources:
+  router:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: router
+      Description: Analyzes the incoming message on API and re-routes it depending on the content to one of the two queues in front of it.
+      Handler: router.main
+      Runtime: nodejs12.x
+      CodeUri: .  
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: 
+                - 'sqs:GetQueueUrl'
+                - 'sqs:SendMessage'
+              Resource:
+              - 'Fn::Join':
+                - ''
+                - - 'arn:aws:sqs:'
+                  - Ref: 'AWS::Region'
+                  - ':'
+                  - Ref: 'AWS::AccountId'
+                  - ':hb_message_processing_queue'
+              - 'Fn::Join':
+                - ''
+                - - 'arn:aws:sqs:'
+                  - Ref: 'AWS::Region'
+                  - ':'
+                  - Ref: 'AWS::AccountId'
+                  - ':nlb_message_processing_queue'
+      Events:
+        transactionsApi:
+          Type: Api
+          Properties:
+            Path: /messages
+            Method: POST
+            
+  HbProcessor:
+    Type: 'AWS::Serverless::Function'      
+    Properties:
+      FunctionName: hb_processor
+      Description: Takes the message from hb queue as an input, processes it and redirects it to processed_messages queue
+      Handler: hbProcessor.main
+      Runtime: nodejs12.x
+      CodeUri: .  
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: 
+                - 'sqs:GetQueueUrl'
+                - 'sqs:SendMessage'
+              Resource:
+              - 'Fn::Join':
+                - ''
+                - - 'arn:aws:sqs:'
+                  - Ref: 'AWS::Region'
+                  - ':'
+                  - Ref: 'AWS::AccountId'
+                  - ':parsed_messages'
+      Events:
+        hbSQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt HbMessageProcessingQueue.Arn
+
+  NlbProcessor:
+    Type: 'AWS::Serverless::Function'      
+    Properties:
+      FunctionName: nlb_processor
+      Description: Takes the message from nlb queue as an input, processes it and redirects it to processed_messages queue
+      Handler: nlbProcessor.main
+      Runtime: nodejs12.x
+      CodeUri: .  
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: 
+                - 'sqs:GetQueueUrl'
+                - 'sqs:SendMessage'
+              Resource:
+              - 'Fn::Join':
+                - ''
+                - - 'arn:aws:sqs:'
+                  - Ref: 'AWS::Region'
+                  - ':'
+                  - Ref: 'AWS::AccountId'
+                  - ':parsed_messages'
+      Events:
+        nlbSQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt NlbMessageProcessingQueue.Arn
+
+  TransactionCreator:
+    Type: 'AWS::Serverless::Function'      
+    Properties:
+      FunctionName: transaction_creator
+      Description: Takes the message from processed_messages queue as an input, processes it and writes it to dynamodb table
+      Handler: transactionCreator.main
+      Runtime: nodejs12.x
+      CodeUri: .  
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: 
+                - 'dynamodb:PutItem'
+              Resource:
+              - 'Fn::Join':
+                - ''
+                - - 'arn:aws:dynamodb:'
+                  - Ref: 'AWS::Region'
+                  - ':'
+                  - Ref: 'AWS::AccountId'
+                  - ':table/transactions'
+      Events:
+        parsedMessagesSQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ParsedMessages.Arn
+
+  Retriever:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: retriever
+      Description: Retrieves the records from dynamodb table and responds with that result on a GET request from API
+      Handler: retriever.main
+      Runtime: nodejs12.x
+      CodeUri: .  
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: 
+                - 'dynamodb:GetItem'
+                - 'dynamodb:Scan'
+              Resource:
+              - 'Fn::Join':
+                - ''
+                - - 'arn:aws:dynamodb:'
+                  - Ref: 'AWS::Region'
+                  - ':'
+                  - Ref: 'AWS::AccountId'
+                  - ':table/transactions'
+      Events:
+        transactionsApi:
+          Type: Api
+          Properties:
+            Path: /messages
+            Method: GET
+
+
+  NlbMessageProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "nlb_message_processing_queue"
+  
+  HbMessageProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "hb_message_processing_queue"
+  
+  ParsedMessages:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: "parsed_messages"
+
+  TransactionsTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: transactions
+      AttributeDefinitions:
+        - AttributeName: uuid
+          AttributeType: S
+      KeySchema:
+        - AttributeName: uuid
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
